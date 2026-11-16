@@ -6,7 +6,7 @@ Calculation and plotting scripts for the study *Rising coastal-zone persistence 
 
 `Raw_data/` contains the analysis inputs used to calculate the figure data. `Database/` contains the processed data used for plotting. Place either folder in the repository root and preserve its internal directory structure.
 
-Processed data for the [v1.0.0 release](https://github.com/guozhi-li/Coastal-TC-Persistence/releases) are archived on [Zenodo](https://doi.org/10.5281/zenodo.23863244). For the current scripts, use the matching `Database/` or regenerate it from `Raw_data/` as described below.
+The processed data used by the current plotting scripts are available on [Zenodo (v1.1.0)](https://doi.org/10.5281/zenodo.24269322). Download and extract `Database.zip`, then place the `Database/` folder alongside `run_pipeline.py`.
 
 ## Project structure
 
