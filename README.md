@@ -4,53 +4,48 @@ Calculation and plotting scripts for the study *Rising coastal-zone persistence 
 
 ## Data
 
-`Raw_data/` contains the analysis inputs used to calculate the figure data. `Database/` contains the processed data used for plotting. Place either folder in the repository root and preserve its internal directory structure.
+Choose the archive that matches your starting point. Either archive is sufficient for its workflow.
 
-The processed data used by the current plotting scripts are available on [Zenodo (v1.1.0)](https://doi.org/10.5281/zenodo.24269322). Download and extract `Database.zip`, then place the `Database/` folder alongside `run_pipeline.py`.
+| Workflow | Download from Zenodo |
+| --- | --- |
+| Regenerate the figure data and then plot the figures | [Raw_data.zip — analysis inputs](https://doi.org/10.5281/zenodo.24270841) |
+| Plot the figures directly from the archived results | [Database.zip — processed figure data](https://doi.org/10.5281/zenodo.24269322) |
 
-## Project structure
-
-```text
-Coastal-TC-Persistence/
-├── Calculate_codes/    # Scripts that read Raw_data/ and generate Database/
-├── Plotting_codes/     # Scripts that read Database/ and generate figures
-├── Raw_data/           # Analysis inputs
-├── Database/           # Processed figure data
-├── Results/            # Generated figures
-├── environment.yml
-└── run_pipeline.py
-```
+The analysis inputs include tropical cyclone tracks, distance-to-coast fields, environmental and climate model data, steering-flow estimates, diagnostics from idealized WRF experiments, and estimates of population and urban grid cell exposure to heavy precipitation.
 
 ## Setup
 
-Run the following commands from the repository root:
+Download or clone this repository. From the repository root, create and activate the Conda environment:
 
 ```bash
 conda env create -f environment.yml
 conda activate coastal-tc
 ```
 
-## Reproduce the figures from processed data
+## Plot the figures from processed data
 
-With `Database/` in the repository root, run:
+Extract `Database.zip` so that the `Database/` folder is alongside `run_pipeline.py`. Then run:
 
 ```bash
 python run_pipeline.py plot --use-database
 ```
 
-Figures are saved in `Results/`. To plot a single figure, specify its identifier. For example, to reproduce Fig. 2:
+## Recalculate the figure data and plot the figures
 
-```bash
-python run_pipeline.py plot --figures M2 --use-database
-```
-
-## Recalculate the figure data from the analysis inputs
-
-With `Raw_data/` in the repository root, run:
+Extract `Raw_data.zip` so that the `Raw_data/` folder is alongside `run_pipeline.py`. Keep the file names and directory structure inside the archive. Then run:
 
 ```bash
 python run_pipeline.py calculate
 python run_pipeline.py plot --use-database
 ```
 
-The first command generates `Database/`. The second reads those data and saves the figures in `Results/`.
+The first command runs `Calculate_codes/` and writes the processed data to `Database/`. The second runs `Plotting_codes/` and saves the figures in `Results/`, with a separate folder for each figure.
+
+To run selected figures, add `--figures` to either command. For example, to regenerate and plot main Fig. 2 and Extended Data Figs. 4 and 5:
+
+```bash
+python run_pipeline.py calculate --figures M2 S4 S5
+python run_pipeline.py plot --use-database --figures M2 S4 S5
+```
+
+The script for Extended Data Fig. 7 generates panels c–f. Extended Data Fig. 10 uses Natural Earth map layers, which Cartopy downloads on first use unless they are already cached.
