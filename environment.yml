@@ -1,0 +1,20 @@
+name: coastal-tc
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - xarray
+  - dask
+  - h5netcdf
+  - h5py
+  - netcdf4
+  - cftime
+  - pymannkendall
+  - cartopy
+  - geopandas
+  - rasterio
+  - pillow
