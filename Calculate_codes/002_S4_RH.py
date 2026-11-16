@@ -326,7 +326,7 @@ def load_product(database_root, product):
                 for months, values in storage.items()}
 
 
-def calculate_profiles(product, cache, distance):
+def annual_profiles(product, cache, distance):
     excluded = exclusion_mask(distance)
     area = spherical_cell_area(distance.lat, distance.lon)
     rows = []
@@ -351,12 +351,8 @@ def calculate_profiles(product, cache, distance):
             values = np.asarray(values, float)
             if not np.isfinite(values).all() or len(values) != END_YEAR - START_YEAR + 1:
                 raise ValueError(f'Incomplete series: {product} {region["name"]} {left}..{right}')
-            fit = stats.linregress(years, values)
-            rows.append({'Region': region['name'], 'Source': product,
-                         'Distance_Center_km': (left+right)/2,
-                         'OLS_Trend_per_Decade': fit.slope*10,
-                         'OLS_CI95_per_Decade': stats.t.ppf(.975, len(values)-2)*fit.stderr*10,
-                         'MK_P': mann_kendall_p(values)})
+            rows.extend({'Source': product, 'Region': region['name'], 'Distance_Center_km': (left+right)/2,
+                         'Year': int(year), 'Value': value} for year, value in zip(years, values))
     return pd.DataFrame(rows)
 
 
@@ -432,13 +428,18 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=resolve_project_path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args(argv)
     output_dir = args.output_dir
+    from environment_inputs import atmos_outputs, fit_profiles
+    if (args.raw_data_dir / 'ENVIRONMENT' / f'{VARIABLE.lower()}_map.nc').is_file():
+        results = atmos_outputs(args.raw_data_dir, VARIABLE, spatial_trend_and_p, mann_kendall_p)
+        write_outputs(output_dir, *assemble_outputs(*results))
+        return
     profiles = []
     new_slope = new_p = era_distance = None
     for product in ('ERA5', 'MERRA2'):
         cache = load_product(args.raw_data_dir, product)
         distance = open_distance(args.raw_data_dir / 'DIST2LAND' / f'{product}_distance_to_coast.nc',
                                  cache[NH_MONTHS].isel(year=0, drop=True))
-        profiles.append(calculate_profiles(product, cache, distance))
+        profiles.append(fit_profiles(annual_profiles(product, cache, distance), mann_kendall_p))
         if product == 'ERA5':
             new_slope, new_p = calculate_map(cache)
             era_distance = distance

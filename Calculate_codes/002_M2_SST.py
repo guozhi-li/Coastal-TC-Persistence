@@ -156,6 +156,9 @@ def spatial_trend_and_p(smoothed):
 
 
 def calculate_spatial_sst_trend():
+    if (DATABASE_ROOT / 'ENVIRONMENT/oisst_map.nc').is_file():
+        from environment_inputs import sst_map
+        return sst_map(DATABASE_ROOT, spatial_trend_and_p)
     field_path, distance_path = SST_PRODUCTS['OISST'][:2]
     require_file(field_path)
     with open_netcdf(field_path, chunks='auto', decode_times=True) as ds:
@@ -308,6 +311,9 @@ def spherical_cell_area(lat, lon, earth_radius_m=6_371_000.0):
 
 
 def calculate_sst_profiles(source, field_path, distance_path):
+    if (DATABASE_ROOT / 'ENVIRONMENT/sst_profiles.csv').is_file():
+        from environment_inputs import sst_profiles
+        return sst_profiles(DATABASE_ROOT, source, mann_kendall_p)
     years_for_source = SST_PROFILE_YEARS[source]
     require_file(field_path)
     with open_netcdf(field_path, chunks='auto', decode_times=True) as ds:
@@ -436,6 +442,13 @@ def calculate_annual_cltc():
 
 
 def calculate_coastal_sst_index(source, start_year):
+    if (DATABASE_ROOT / 'ENVIRONMENT/sst_index.csv').is_file():
+        from environment_inputs import sst_index
+        return sst_index(DATABASE_ROOT, source, start_year)
+    return coastal_sst_index_from_monthly(source, start_year)
+
+
+def coastal_sst_index_from_monthly(source, start_year):
     field_path, distance_path = SST_PRODUCTS[source][:2]
     require_file(field_path)
     with open_netcdf(field_path, chunks={'time': 12}, decode_times=True) as dataset:
@@ -607,9 +620,10 @@ def cmip6_horizontal_coordinates(array):
 
 def open_cmip6_sst(path):
     require_file(path)
-    dataset = open_netcdf(path, decode_times=True, use_cftime=True)
+    dataset = open_netcdf(path, decode_times=True, use_cftime=True, chunks={'time': 12})
     variable = choose_cmip6_data_variable(dataset, CMIP6_SST_CANDIDATES, 'SST')
     array = normalize_cmip6_longitude(rename_cmip6_coordinates(dataset[variable]).squeeze(drop=True))
+    array = array.assign_coords(lat=array.lat.load(), lon=array.lon.load())
     if not {'time', 'lat', 'lon'}.issubset(array.coords):
         raise ValueError(f'{path.name}: SST must have time/lat/lon coordinates')
     extra = [dim for dim in array.dims if dim != 'time' and dim not in cmip6_horizontal_dims(array)]
@@ -795,18 +809,32 @@ def calculate_cmip6_trend_statistics(table):
     return {'N_Years': int(len(values)), 'Mean_SST': float(np.mean(values)), 'OLS_Trend_K_per_Decade': float(fit.slope * 10.0), 'OLS_CI95_K_per_Decade': float(tcrit * fit.stderr * 10.0), 'OLS_P': float(fit.pvalue), 'MK_Tau': float(tau), 'MK_P': float(mk_p)}
 
 
-def calculate_cmip6_model_trends(inventory):
+def raw_cmip6_sst_bins(inventory, model, experiment):
+    field = open_cmip6_sst(inventory[model, experiment])
+    distance = open_cmip6_distance(inventory[model, 'distance'], field)
+    try:
+        return cmip6_distance_bin_series(field, distance, f'{model}/{experiment}')
+    finally:
+        distance.close()
+        field.close()
+
+
+def calculate_cmip6_model_trends(inventory=None):
+    compact_path = CMIP6_ROOT / 'sst_annual_bins.csv.gz'
+    compact = None
+    if inventory is None:
+        if compact_path.is_file():
+            from cmip6_inputs import read_annual_bins
+            compact = read_annual_bins(
+                compact_path, CMIP6_MODELS, dict(CMIP6_EXPERIMENTS),
+                CMIP6_DISTANCE_EDGES_KM, CMIP6_START_YEAR, CMIP6_END_YEAR, 'SST')
+        else:
+            inventory = validate_cmip6_inventory()
     trend_rows = []
     for model in CMIP6_MODELS:
-        distance_path = inventory[model, 'distance']
         for experiment, forcing in CMIP6_EXPERIMENTS:
-            input_path = inventory[model, experiment]
-            print(f'Processing {model}/{experiment}: {input_path.name}')
-            field = open_cmip6_sst(input_path)
-            distance = open_cmip6_distance(distance_path, field)
-            annual_bins = cmip6_distance_bin_series(
-                field, distance, f'{model}/{experiment}'
-            )
+            annual_bins = (compact.get_group((model, experiment)) if compact is not None
+                           else raw_cmip6_sst_bins(inventory, model, experiment))
             for (left, right, center), table in annual_bins.groupby(
                 ['Distance_Left_km', 'Distance_Right_km', 'Distance_Center_km'],
                 sort=True,
@@ -820,7 +848,6 @@ def calculate_cmip6_model_trends(inventory):
                     'Distance_Center_km': float(center),
                     **calculate_cmip6_trend_statistics(table[['Year', 'SST']]),
                 })
-            field.close()
 
     trends = pd.DataFrame(trend_rows)
     expected_bins = len(CMIP6_DISTANCE_EDGES_KM) - 1
@@ -954,8 +981,7 @@ def preprocess(output_dir, panels):
                  output_dir / 'FigM2E_CLTC_SST_sensitivity.csv')
     if 'F' in panels:
         print('Panel F: CMIP6 SST attribution ...')
-        inventory = validate_cmip6_inventory()
-        trends = calculate_cmip6_model_trends(inventory)
+        trends = calculate_cmip6_model_trends()
         attribution = summarize_cmip6_ensemble(trends)
         save_csv(attribution, ATTRIBUTION_COLUMNS, 16,
                  output_dir / 'FigM2F_CMIP6_SST_attribution.csv')

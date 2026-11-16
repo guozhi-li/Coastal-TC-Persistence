@@ -290,21 +290,25 @@ def open_signed_distance(path):
 def calculate_aod_map(database_root):
     """Apply the original analysis only to the small native East Asia subset."""
     database_root = Path(database_root)
-    path = database_root / 'ENVIRONMENT/MERRA2/MERRA2_gas_1980-2024.nc'
-    with open_netcdf(path, chunks={'time': 12}) as dataset:
-        variable = choose_data_variable(dataset, AOD_CANDIDATES, 'MERRA-2 AOD')
-        aod = canonicalize(dataset[variable])
-        for dim in set(aod.dims) - {'time', 'lat', 'lon'}:
-            if aod.sizes[dim] != 1:
-                raise ValueError(f'Unsupported MERRA-2 AOD dimension: {dim}')
-            aod = aod.isel({dim: 0}, drop=True)
-        aod = aod.sel(lat=slice(10, 45), lon=slice(100, 145))
-        aod = aod.where(((aod.time.dt.year >= 1980) & (aod.time.dt.year <= 2024)), drop=True)
-        distance = open_signed_distance(database_root / 'DIST2LAND/MERRA2_distance_to_coast.nc')
-        distance = distance.sel(lat=slice(10, 45), lon=slice(100, 145))
-        distance = require_same_grid(aod, distance, 'MERRA-2 East Asia AOD')
-        annual = complete_season(aod, NH_MONTHS, 1980, 2024, 'MERRA-2 East Asia July-November')
-        annual = annual.astype(np.float32).load()
+    if (database_root / 'ENVIRONMENT/aod_map.nc').is_file():
+        from environment_inputs import aod_inputs
+        annual, distance, variable = aod_inputs(database_root)
+    else:
+        path = database_root / 'ENVIRONMENT/MERRA2/MERRA2_gas_1980-2024.nc'
+        with open_netcdf(path, chunks={'time': 12}) as dataset:
+            variable = choose_data_variable(dataset, AOD_CANDIDATES, 'MERRA-2 AOD')
+            aod = canonicalize(dataset[variable])
+            for dim in set(aod.dims) - {'time', 'lat', 'lon'}:
+                if aod.sizes[dim] != 1:
+                    raise ValueError(f'Unsupported MERRA-2 AOD dimension: {dim}')
+                aod = aod.isel({dim: 0}, drop=True)
+            aod = aod.sel(lat=slice(10, 45), lon=slice(100, 145))
+            aod = aod.where(((aod.time.dt.year >= 1980) & (aod.time.dt.year <= 2024)), drop=True)
+            distance = open_signed_distance(database_root / 'DIST2LAND/MERRA2_distance_to_coast.nc')
+            distance = distance.sel(lat=slice(10, 45), lon=slice(100, 145))
+            distance = require_same_grid(aod, distance, 'MERRA-2 East Asia AOD')
+            annual = complete_season(aod, NH_MONTHS, 1980, 2024, 'MERRA-2 East Asia July-November')
+            annual = annual.astype(np.float32).load()
     trend, p_value, count = calculate_grid_trend_and_p(annual)
     trend.name = 'aod_trend'
     trend.attrs = {'long_name': 'OLS trend in July-November AOD', 'units': 'decade-1'}
@@ -476,8 +480,8 @@ def spherical_cell_area(lat, lon, earth_radius_m=6_371_000.0):
     )
 
 
-def model_experiment_vws_trends(model, experiment):
-    """Fit each model's trend to its annual distance-bin mean VWS series."""
+def raw_cmip6_vws_bins(model, experiment):
+    """Extract July–November native-grid distance-bin mean VWS by year."""
     print(f"Processing CMIP6: {model} / {experiment}")
     u = open_cmip6_field(cmip6_path(model, experiment, "ua"), "ua")
     v = open_cmip6_field(cmip6_path(model, experiment, "va"), "va")
@@ -531,6 +535,27 @@ def model_experiment_vws_trends(model, experiment):
         )
         series = numerator / denominator
         values = np.asarray(series.values, dtype=float)
+        rows.append(pd.DataFrame({
+            'Year': years.astype(int), 'VWS': values,
+            'Distance_Left_km': left, 'Distance_Right_km': right,
+            'Distance_Center_km': (left+right)/2,
+            'Grid_Cell_Count': int(selected.sum().item()),
+            'Domain_Grid_Cell_Count': selected_domain_cells,
+        }))
+    u.close()
+    v.close()
+    return pd.concat(rows, ignore_index=True)
+
+
+def model_experiment_vws_trends(model, experiment, annual_bins=None):
+    """Fit each model's trend to its annual distance-bin mean VWS series."""
+    if annual_bins is None:
+        annual_bins = raw_cmip6_vws_bins(model, experiment)
+    region = FIG3_REGION
+    rows = []
+    for (left, right), group in annual_bins.groupby(['Distance_Left_km', 'Distance_Right_km']):
+        years = group.Year.to_numpy(dtype=float)
+        values = group.VWS.to_numpy(dtype=float)
         valid = np.isfinite(years) & np.isfinite(values)
         n_years = int(valid.sum())
         if n_years < MIN_VALID_YEARS:
@@ -550,8 +575,8 @@ def model_experiment_vws_trends(model, experiment):
             "Distance_Left_km": float(left),
             "Distance_Right_km": float(right),
             "Distance_Center_km": float((left + right) / 2.0),
-            "Grid_Cell_Count": int(selected.sum().item()),
-            "Domain_Grid_Cell_Count": selected_domain_cells,
+            "Grid_Cell_Count": int(group.Grid_Cell_Count.iloc[0]),
+            "Domain_Grid_Cell_Count": int(group.Domain_Grid_Cell_Count.iloc[0]),
             "Exclusion_Region": "none; WNP inclusion polygon only",
             "Start_Year": CMIP6_START_YEAR,
             "End_Year": CMIP6_END_YEAR,
@@ -572,13 +597,18 @@ def model_experiment_vws_trends(model, experiment):
             ),
             "Distance_Sign": "land negative; ocean positive",
         })
-    u.close()
-    v.close()
     return rows
 
 
 def calculate_era5_vws_trends():
     """ERA5 reference: same season, region, signed bins and OLS method as CMIP6."""
+    if (CMIP6_DIR.parent / 'ENVIRONMENT/era5_vws.csv').is_file():
+        from environment_inputs import era5_vws
+        return era5_vws(CMIP6_DIR.parent, mann_kendall_p)
+    return era5_vws_trends_from_monthly()
+
+
+def era5_vws_trends_from_monthly():
     for path in (ERA5_U_FILE, ERA5_V_FILE, ERA5_DISTANCE_FILE):
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -655,10 +685,18 @@ def calculate_era5_vws_trends():
 
 
 def calculate_cmip6_summary():
+    compact_path = CMIP6_DIR / 'vws_annual_bins.csv.gz'
+    compact = None
+    if compact_path.is_file():
+        from cmip6_inputs import read_annual_bins
+        compact = read_annual_bins(
+            compact_path, MODELS, EXPERIMENTS, DISTANCE_EDGES_KM,
+            CMIP6_START_YEAR, CMIP6_END_YEAR, 'VWS')
     rows = []
     for model in MODELS:
         for experiment in EXPERIMENTS:
-            rows.extend(model_experiment_vws_trends(model, experiment))
+            bins = compact.get_group((model, experiment)) if compact is not None else None
+            rows.extend(model_experiment_vws_trends(model, experiment, bins))
     model_table = pd.DataFrame(rows)
     group_columns = [
         "Experiment", "Forcing", "Region", "Region_Label", "Season",

@@ -13,8 +13,11 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_RAW_DATA_DIR = PROJECT_DIR / 'Raw_data'
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / 'Database/URBAN'
 GISA_RELATIVE = Path('GISA/GISA_impervious_fraction_1985_2021_0p01deg.nc')
+GISA_REGIONAL = {
+    'East Asia': Path('GISA/GISA_impervious_fraction_2021_East_Asia_0p01deg.nc'),
+    'North America': Path('GISA/GISA_impervious_fraction_2021_North_America_0p01deg.nc'),
+}
 COAST_RELATIVE = Path('GSHHG/GSHHS_f_L1_1400.shp')
-GISA_FILE = DEFAULT_RAW_DATA_DIR / GISA_RELATIVE
 COAST_FILE = DEFAULT_RAW_DATA_DIR / COAST_RELATIVE
 
 
@@ -77,21 +80,41 @@ def read_gisa_box(dataset, box):
         raise ValueError(f'GISA subset empty: {box}')
     return fraction.load()
 
+def coastal_geometries(bounds):
+    try:
+        import geopandas as gpd
+    except ModuleNotFoundError:
+        gpd = None
+    if gpd is not None:
+        coast = gpd.read_file(COAST_FILE, bbox=bounds)
+        if coast.crs is not None and coast.crs.to_epsg() != 4326:
+            coast = coast.to_crs(4326)
+        if coast.empty:
+            raise ValueError('No GSHHG polygons in selected map')
+        yield from (geometry for geometry in coast.geometry if geometry is not None)
+        return
+
+    import shapefile
+    from rasterio.crs import CRS
+    from rasterio.warp import transform_bounds, transform_geom
+    wgs84 = CRS.from_epsg(4326)
+    source_crs = CRS.from_wkt(COAST_FILE.with_suffix('.prj').read_text())
+    query_bounds = bounds if source_crs == wgs84 else transform_bounds(wgs84, source_crs, *bounds)
+    with shapefile.Reader(str(COAST_FILE)) as coast:
+        for shape in coast.iterShapes(bbox=query_bounds):
+            if shape is not None and shape.shapeType != shapefile.NULL:
+                geometry = shape.__geo_interface__
+                yield geometry if source_crs == wgs84 else transform_geom(source_crs, wgs84, geometry)
+
 def land_mask_from_gshhg(lat, lon):
-    import geopandas as gpd
     import rasterio.features
     from rasterio.transform import from_bounds
-
     west,east = coordinate_edges(lon)[[0,-1]]
     south,north = coordinate_edges(lat)[[0,-1]]
-    coast = gpd.read_file(COAST_FILE,bbox=(west,south,east,north))
-    if coast.crs is not None and coast.crs.to_epsg()!=4326:
-        coast = coast.to_crs(4326)
-    if coast.empty:
-        raise ValueError('No GSHHG polygons in selected map')
-    transform = from_bounds(west,south,east,north,len(lon),len(lat))
+    bounds = (west,south,east,north)
+    transform = from_bounds(*bounds,len(lon),len(lat))
     top_down = rasterio.features.rasterize(
-        ((geometry,1) for geometry in coast.geometry if geometry is not None),
+        ((geometry,1) for geometry in coastal_geometries(bounds)),
         out_shape=(len(lat),len(lon)),transform=transform,
         fill=0,dtype='uint8',all_touched=False)
     return np.flipud(top_down).astype(bool)
@@ -259,7 +282,7 @@ def prepare_plot_map(region, lat, lon, category, distance):
 
 
 def main(argv=None):
-    global GISA_FILE, COAST_FILE
+    global COAST_FILE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--raw-data-dir', type=Path, default=DEFAULT_RAW_DATA_DIR,
                         help='Root containing the GISA and GSHHG source directories.')
@@ -268,21 +291,28 @@ def main(argv=None):
     args = parser.parse_args(argv)
     raw_data_dir = args.raw_data_dir.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
-    GISA_FILE, COAST_FILE = raw_data_dir / GISA_RELATIVE, raw_data_dir / COAST_RELATIVE
-    required = [GISA_FILE] + [COAST_FILE.with_suffix(suffix)
+    COAST_FILE = raw_data_dir / COAST_RELATIVE
+    gisa_sources = {region: raw_data_dir / path for region, path in GISA_REGIONAL.items()}
+    global_source = raw_data_dir / GISA_RELATIVE
+    if global_source.is_file():
+        for region, path in gisa_sources.items():
+            if not path.is_file():
+                gisa_sources[region] = global_source
+    required = list(gisa_sources.values()) + [COAST_FILE.with_suffix(suffix)
                              for suffix in ('.shp', '.shx', '.dbf', '.prj')]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError('Missing source inputs:\n  ' + '\n  '.join(missing))
     ratio_rows = []
-    with open_source_netcdf(GISA_FILE, decode_times=False, mask_and_scale=True) as dataset:
-        if 'impervious_fraction' not in dataset:
-            raise KeyError(f'Missing impervious_fraction: {GISA_FILE}')
-        if 2021 not in np.asarray(dataset.year.values, int):
-            raise ValueError('GISA missing year: 2021')
-        validate_regular_grid(dataset.lat.values, dataset.lon.values, spacing=.01)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for panel, region in [('A', 'East Asia'), ('B', 'North America')]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for panel, (region, _) in REGIONS.items():
+        path = gisa_sources[region]
+        with open_source_netcdf(path, decode_times=False, mask_and_scale=True) as dataset:
+            if 'impervious_fraction' not in dataset:
+                raise KeyError(f'Missing impervious_fraction: {path}')
+            if 2021 not in np.asarray(dataset.year.values, int):
+                raise ValueError(f'GISA missing year 2021: {path}')
+            validate_regular_grid(dataset.lat.values, dataset.lon.values, spacing=.01)
             print(f'Calculating S10 {region} from GISA and GSHHG.', flush=True)
             lat, lon, category, distance, rows = prepare_region(dataset, region)
             result = prepare_plot_map(region, lat, lon, category, distance)
